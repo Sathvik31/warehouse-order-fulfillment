@@ -11,6 +11,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import com.warehouse.inventory.service.InventoryService;
 
 import java.net.URI;
 import java.util.UUID;
@@ -87,6 +88,28 @@ public class GlobalExceptionHandler {
         pd.setTitle("Internal server error");
         pd.setInstance(URI.create(request.getRequestURI()));
         pd.setProperty("correlationId", correlationId);
+        return pd;
+    }
+
+    @ExceptionHandler(InventoryService.ReservationNotFoundException.class)
+    public ProblemDetail handleReservationNotFound(
+            InventoryService.ReservationNotFoundException ex, HttpServletRequest request) {
+        var pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        pd.setType(URI.create("https://api.warehouse/errors/reservation-not-found"));
+        pd.setTitle("Reservation not found");
+        pd.setInstance(URI.create(request.getRequestURI()));
+        pd.setProperty("correlationId", UUID.randomUUID().toString());
+        return pd;
+    }
+
+    @ExceptionHandler(InventoryService.InvalidReservationStateException.class)
+    public ProblemDetail handleInvalidReservationState(
+            InventoryService.InvalidReservationStateException ex, HttpServletRequest request) {
+        var pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create("https://api.warehouse/errors/invalid-reservation-state"));
+        pd.setTitle("Invalid reservation state");
+        pd.setInstance(URI.create(request.getRequestURI()));
+        pd.setProperty("correlationId", UUID.randomUUID().toString());
         return pd;
     }
 }

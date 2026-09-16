@@ -22,6 +22,7 @@ public class InventoryService {
     private final StockRepository stockRepository;
     private final ReservationRepository reservationRepository;
     private final OutboxRepository outboxRepository;
+    private final InventoryQueryService inventoryQueryService;
 
     @Value("${warehouse.default-id}")
     private String defaultWarehouseId;
@@ -80,6 +81,7 @@ public class InventoryService {
 
         // ---- 8. Write to outbox (same transaction) ----------------------
         writeStockReservedToOutbox(reservation, item, stock);
+        inventoryQueryService.invalidateStockCache(item.getSku());
 
         log.info("Reservation created: reservationId={}, orderId={}, sku={}, quantity={}",
                 reservation.getId(), reservation.getOrderId(), request.sku(), request.quantity());
@@ -121,6 +123,198 @@ public class InventoryService {
         outboxRepository.save(outboxEvent);
     }
 
+    @Transactional
+    public ReservationOperationResult confirm(ConfirmReservationRequest request) {
+        log.info("Confirm request: reservationId={}, idempotencyKey={}",
+                request.reservationId(), request.idempotencyKey());
+
+        // ---- 1. Lock the reservation ----
+        var reservation = reservationRepository.findByIdForUpdate(request.reservationId())
+                .orElseThrow(() -> new ReservationNotFoundException(request.reservationId()));
+        var itemSku = itemRepository.findById(reservation.getItemId())
+                .map(Item::getSku).orElse(null);
+        // ---- 2. Idempotency check (post-lock, so we see the definitive state) ----
+        if (reservation.getStatus() == ReservationStatus.CONFIRMED) {
+            log.info("Idempotent replay: reservation {} already CONFIRMED", reservation.getId());
+            return toOperationResult(reservation, /* wasIdempotentReplay = */ true);
+        }
+
+        // ---- 3. State check: only RESERVED can be confirmed ----
+        if (reservation.getStatus() != ReservationStatus.RESERVED) {
+            throw new InvalidReservationStateException(
+                    reservation.getId(), reservation.getStatus(), "confirm");
+        }
+
+        // ---- 4. Lock the stock row and apply the confirm math ----
+        var stock = stockRepository.findByItemIdAndWarehouseIdForUpdate(
+                        reservation.getItemId(), reservation.getWarehouseId())
+                .orElseThrow(() -> new StockNotFoundException(
+                        reservation.getItemId(), reservation.getWarehouseId()));
+
+        // Confirm: physical stock leaves, reservation is fulfilled.
+        // Both quantity_on_hand and quantity_reserved decrement by the same amount.
+        stock.setQuantityOnHand(stock.getQuantityOnHand() - reservation.getQuantity());
+        stock.setQuantityReserved(stock.getQuantityReserved() - reservation.getQuantity());
+        stockRepository.save(stock);
+
+
+
+        reservation.setStatus(ReservationStatus.CONFIRMED);
+        var savedReservation = reservationRepository.save(reservation);
+
+        writeStockConfirmedToOutbox(savedReservation, stock);
+
+        if (itemSku != null) {
+            inventoryQueryService.invalidateStockCache(itemSku);
+        }
+
+        log.info("Reservation confirmed: reservationId={}, stockRemaining={}",
+                savedReservation.getId(), stock.getQuantityOnHand());
+
+        return toOperationResult(savedReservation, false);
+    }
+
+    @Transactional
+    public ReservationOperationResult release(ReleaseReservationRequest request) {
+        log.info("Release request: reservationId={}, reason={}, idempotencyKey={}",
+                request.reservationId(), request.reason(), request.idempotencyKey());
+
+        // ---- 1. Lock the reservation ----
+        var reservation = reservationRepository.findByIdForUpdate(request.reservationId())
+                .orElseThrow(() -> new ReservationNotFoundException(request.reservationId()));
+        var itemSku = itemRepository.findById(reservation.getItemId())
+                .map(Item::getSku).orElse(null);
+        // ---- 2. Idempotency check ----
+        if (reservation.getStatus() == ReservationStatus.RELEASED) {
+            log.info("Idempotent replay: reservation {} already RELEASED", reservation.getId());
+            return toOperationResult(reservation, true);
+        }
+
+        // ---- 3. State check: only RESERVED or CONFIRMED can be released ----
+        var priorStatus = reservation.getStatus();
+        if (priorStatus != ReservationStatus.RESERVED && priorStatus != ReservationStatus.CONFIRMED) {
+            throw new InvalidReservationStateException(
+                    reservation.getId(), priorStatus, "release");
+        }
+
+        // ---- 4. Lock stock and apply the correct release math based on prior state ----
+        var stock = stockRepository.findByItemIdAndWarehouseIdForUpdate(
+                        reservation.getItemId(), reservation.getWarehouseId())
+                .orElseThrow(() -> new StockNotFoundException(
+                        reservation.getItemId(), reservation.getWarehouseId()));
+
+        if (priorStatus == ReservationStatus.RESERVED) {
+            // Release of a still-held reservation: just undo the hold.
+            stock.setQuantityReserved(stock.getQuantityReserved() - reservation.getQuantity());
+        } else {
+            // priorStatus == CONFIRMED: compensation for an already-completed order.
+            // Physical stock returns to the warehouse.
+            stock.setQuantityOnHand(stock.getQuantityOnHand() + reservation.getQuantity());
+        }
+        stockRepository.save(stock);
+
+        reservation.setStatus(ReservationStatus.RELEASED);
+        var savedReservation = reservationRepository.save(reservation);
+
+        writeStockReleasedToOutbox(savedReservation, stock, request.reason(), priorStatus);
+
+        if (itemSku != null) {
+            inventoryQueryService.invalidateStockCache(itemSku);
+        }
+
+        log.info("Reservation released: reservationId={}, priorStatus={}, availableAfter={}",
+                savedReservation.getId(), priorStatus, stock.getQuantityAvailable());
+
+        return toOperationResult(savedReservation, false);
+    }
+
+// ==================== Outbox helpers ====================
+
+    private void writeStockConfirmedToOutbox(Reservation reservation, Stock stock) {
+        var eventId = UUID.randomUUID();
+        var sku = itemRepository.findById(reservation.getItemId())
+                .map(Item::getSku).orElse("<unknown>");
+
+        Map<String, Object> envelope = new HashMap<>();
+        envelope.put("eventId", eventId.toString());
+        envelope.put("eventType", "StockConfirmed");
+        envelope.put("eventVersion", 1);
+        envelope.put("occurredAt", OffsetDateTime.now().toString());
+        envelope.put("correlationId", reservation.getOrderId().toString());
+        envelope.put("producer", "inventory-service");
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("reservationId", reservation.getId().toString());
+        payload.put("orderId", reservation.getOrderId().toString());
+        payload.put("itemId", reservation.getItemId().toString());
+        payload.put("sku", sku);
+        payload.put("warehouseId", reservation.getWarehouseId());
+        payload.put("quantity", reservation.getQuantity());
+        payload.put("quantityOnHandAfter", stock.getQuantityOnHand());
+        envelope.put("payload", payload);
+
+        var outboxEvent = OutboxEvent.builder()
+                .id(eventId)
+                .aggregateType("Reservation")
+                .aggregateId(reservation.getId().toString())
+                .topic("inventory.events")
+                .partitionKey(sku)
+                .eventType("StockConfirmed")
+                .payload(envelope)
+                .build();
+
+        outboxRepository.save(outboxEvent);
+    }
+
+    private void writeStockReleasedToOutbox(
+            Reservation reservation, Stock stock, String reason, ReservationStatus priorStatus) {
+        var eventId = UUID.randomUUID();
+        var sku = itemRepository.findById(reservation.getItemId())
+                .map(Item::getSku).orElse("<unknown>");
+
+        Map<String, Object> envelope = new HashMap<>();
+        envelope.put("eventId", eventId.toString());
+        envelope.put("eventType", "StockReleased");
+        envelope.put("eventVersion", 1);
+        envelope.put("occurredAt", OffsetDateTime.now().toString());
+        envelope.put("correlationId", reservation.getOrderId().toString());
+        envelope.put("producer", "inventory-service");
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("reservationId", reservation.getId().toString());
+        payload.put("orderId", reservation.getOrderId().toString());
+        payload.put("itemId", reservation.getItemId().toString());
+        payload.put("sku", sku);
+        payload.put("warehouseId", reservation.getWarehouseId());
+        payload.put("quantity", reservation.getQuantity());
+        payload.put("quantityAvailableAfter", stock.getQuantityAvailable());
+        payload.put("reason", reason);
+        payload.put("priorStatus", priorStatus.name());
+        envelope.put("payload", payload);
+
+        var outboxEvent = OutboxEvent.builder()
+                .id(eventId)
+                .aggregateType("Reservation")
+                .aggregateId(reservation.getId().toString())
+                .topic("inventory.events")
+                .partitionKey(sku)
+                .eventType("StockReleased")
+                .payload(envelope)
+                .build();
+
+        outboxRepository.save(outboxEvent);
+    }
+
+// ==================== Result mapper for confirm/release ====================
+
+    private ReservationOperationResult toOperationResult(Reservation r, boolean wasIdempotentReplay) {
+        return new ReservationOperationResult(
+                r.getId(),
+                r.getStatus(),
+                r.getUpdatedAt(),
+                wasIdempotentReplay
+        );
+    }
     private ReservationResult toResult(Reservation r, boolean wasIdempotentReplay) {
         // Look up SKU for the response (we have item_id, need to include human-readable sku)
         var sku = itemRepository.findById(r.getItemId())
@@ -137,6 +331,7 @@ public class InventoryService {
                 wasIdempotentReplay
         );
     }
+
 
     // ==================== Exception types ====================
 
@@ -166,5 +361,19 @@ public class InventoryService {
 
         public int getRequested() { return requested; }
         public int getAvailable() { return available; }
+    }
+
+    public static class ReservationNotFoundException extends RuntimeException {
+        public ReservationNotFoundException(UUID reservationId) {
+            super("Reservation not found: " + reservationId);
+        }
+    }
+
+    public static class InvalidReservationStateException extends RuntimeException {
+        public InvalidReservationStateException(UUID reservationId, ReservationStatus currentStatus, String operation) {
+            super(String.format(
+                    "Cannot %s reservation %s in state %s",
+                    operation, reservationId, currentStatus));
+        }
     }
 }
