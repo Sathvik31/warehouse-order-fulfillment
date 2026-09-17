@@ -33,7 +33,16 @@ spring:
         max.in.flight.requests.per.connection: 5
         retries: 2147483647
         delivery.timeout.ms: 120000
-    # ===== NEW: Redis configuration =====
+    consumer:
+      group-id: inventory-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      properties:
+        isolation.level: read_committed
+      listener:
+        ack-mode: manual
     data:
       redis:
         host: localhost
@@ -63,6 +72,8 @@ warehouse:
 inventory:
   events:
     topic-name: inventory.events
+  consumed-topics:
+    orders-events: orders.events
   cache:
     stock-ttl-seconds: 5
 
