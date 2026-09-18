@@ -115,6 +115,13 @@ public class OrchestratorService {
                 payload.put("sku", order.getSku());
                 payload.put("quantity", order.getQuantity());
             }
+            case ORDER_CANCELLED -> {   // NEW
+                eventType = "OrderCancelled";
+                payload.put("orderId", order.getId().toString());
+                payload.put("customerId", order.getCustomerId().toString());
+                payload.put("sku", order.getSku());
+                payload.put("quantity", order.getQuantity());
+            }
             default -> throw new IllegalStateException("Unhandled SagaCommand: " + command);
         }
 
@@ -142,11 +149,12 @@ public class OrchestratorService {
 
     private OrderStatus mapSagaStateToOrderStatus(SagaState sagaState) {
         return switch (sagaState) {
-            case PENDING   -> OrderStatus.PENDING;
-            case RESERVED  -> OrderStatus.RESERVED;
-            case CONFIRMED -> OrderStatus.CONFIRMED;
-            case CANCELLED -> OrderStatus.CANCELLED;
-            case FAILED    -> OrderStatus.FAILED;
+            case PENDING    -> OrderStatus.PENDING;
+            case RESERVED   -> OrderStatus.RESERVED;
+            case CONFIRMED  -> OrderStatus.CONFIRMED;
+            case CANCELLING -> OrderStatus.CANCELLING;   // NEW
+            case CANCELLED  -> OrderStatus.CANCELLED;
+            case FAILED     -> OrderStatus.FAILED;
         };
     }
 }

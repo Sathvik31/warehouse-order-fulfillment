@@ -11,6 +11,8 @@ package com.warehouse.fulfillment.saga;
 public enum SagaCommand {
     NONE,
     CONFIRM_RESERVATION,
-    ORDER_CONFIRMED
-    // Session 10 will add: RELEASE_STOCK, ORDER_FAILED, ORDER_CANCELLED
+    ORDER_CONFIRMED,
+    ORDER_CANCELLED   // NEW — domain event published when compensation completes
+    // Session 10 optionally: RELEASE_STOCK is issued directly from the cancel API,
+    // not from the state machine, so it doesn't need to be here.
 }

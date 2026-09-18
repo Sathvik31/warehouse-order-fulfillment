@@ -17,6 +17,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import com.warehouse.fulfillment.service.CancelOrderRequest;
+import org.springframework.web.bind.annotation.PathVariable;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/orders")
@@ -53,6 +56,34 @@ public class OrderController {
                 result.orderId(),
                 result.status(),
                 result.createdAt()
+        );
+
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
+    }
+    @PostMapping("/{orderId}/cancel")
+    @Operation(summary = "Cancel a CONFIRMED order (triggers Saga compensation)")
+    @ApiResponses({
+            @ApiResponse(responseCode = "202", description = "Cancellation accepted, compensation in progress"),
+            @ApiResponse(responseCode = "404", description = "Order not found"),
+            @ApiResponse(responseCode = "409", description = "Order is in a state that cannot be cancelled")
+    })
+    public ResponseEntity<CancelOrderHttpResponse> cancel(
+            @Parameter(description = "Order ID to cancel", required = true)
+            @PathVariable UUID orderId,
+
+            @RequestBody(required = false) CancelOrderHttpRequest request
+    ) {
+        var reason = (request != null && request.reason() != null)
+                ? request.reason()
+                : "ORDER_CANCELLED";
+
+        var serviceRequest = new CancelOrderRequest(orderId, reason);
+        var result = orderService.cancelOrder(serviceRequest);
+
+        var response = new CancelOrderHttpResponse(
+                result.orderId(),
+                result.status(),
+                result.updatedAt()
         );
 
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);

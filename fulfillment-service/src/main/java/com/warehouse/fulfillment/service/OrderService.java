@@ -9,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.warehouse.fulfillment.repository.OrderSagaStateRepository;
+
 
 import java.time.OffsetDateTime;
 import java.util.HashMap;
@@ -23,7 +25,6 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final OrderSagaStateRepository sagaStateRepository;
     private final OutboxRepository outboxRepository;
-
     @Value("${fulfillment.events.topic-name}")
     private String ordersEventsTopic;
 
@@ -109,4 +110,101 @@ public class OrderService {
                 wasIdempotentReplay
         );
     }
+    public static class OrderNotFoundException extends RuntimeException {
+        public OrderNotFoundException(UUID orderId) {
+            super("Order not found: " + orderId);
+        }
+    }
+    @Transactional
+    public CancelOrderResult cancelOrder(CancelOrderRequest request) {
+        log.info("Cancel order request: orderId={}, reason={}", request.orderId(), request.reason());
+
+        // ---- 1. Lock the order row ----
+        var order = orderRepository.findByIdForUpdate(request.orderId())
+                .orElseThrow(() -> new OrderNotFoundException(request.orderId()));
+
+        // ---- 2. Idempotency check via natural state ----
+        if (order.getStatus() == OrderStatus.CANCELLING
+                || order.getStatus() == OrderStatus.CANCELLED) {
+            log.info("Idempotent replay: order {} already in {} state",
+                    order.getId(), order.getStatus());
+            return toCancelResult(order, /* wasIdempotentReplay = */ true);
+        }
+
+        // ---- 3. State validation: only CONFIRMED can be cancelled ----
+        if (order.getStatus() != OrderStatus.CONFIRMED) {
+            throw new InvalidOrderStateException(
+                    order.getId(), order.getStatus(), "cancel");
+        }
+
+        // ---- 4. Lock the saga state row ----
+        var sagaState = sagaStateRepository.findByOrderIdForUpdate(request.orderId())
+                .orElseThrow(() -> new IllegalStateException(
+                        "No saga state found for orderId=" + request.orderId()));
+
+        // ---- 5. Transition both to CANCELLING ----
+        order.setStatus(OrderStatus.CANCELLING);
+        var savedOrder = orderRepository.save(order);
+
+        sagaState.setCurrentState(SagaState.CANCELLING);
+        sagaState.setLastEventType("CancelRequested");    // synthetic name — this transition
+        // wasn't event-driven, it was API-driven
+        sagaState.setLastEventAt(OffsetDateTime.now());
+        sagaStateRepository.save(sagaState);
+
+        // ---- 6. Write ReleaseStock command to the outbox ----
+        writeReleaseStockCommandToOutbox(savedOrder, request.reason());
+
+        log.info("Cancel initiated: orderId={}, transitioned to CANCELLING", savedOrder.getId());
+
+        return toCancelResult(savedOrder, false);
+    }
+
+    private void writeReleaseStockCommandToOutbox(Order order, String reason) {
+        var eventId = UUID.randomUUID();
+
+        Map<String, Object> envelope = new HashMap<>();
+        envelope.put("eventId", eventId.toString());
+        envelope.put("eventType", "ReleaseStock");
+        envelope.put("eventVersion", 1);
+        envelope.put("occurredAt", OffsetDateTime.now().toString());
+        envelope.put("correlationId", order.getId().toString());
+        envelope.put("producer", "fulfillment-service");
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("orderId", order.getId().toString());
+        payload.put("reservationId", order.getReservationId().toString());
+        payload.put("reason", reason != null ? reason : "ORDER_CANCELLED");
+        envelope.put("payload", payload);
+
+        var outboxEvent = OutboxEvent.builder()
+                .id(eventId)
+                .aggregateType("Order")
+                .aggregateId(order.getId().toString())
+                .topic(ordersEventsTopic)
+                .partitionKey(order.getId().toString())
+                .eventType("ReleaseStock")
+                .payload(envelope)
+                .build();
+
+        outboxRepository.save(outboxEvent);
+    }
+
+    private CancelOrderResult toCancelResult(Order order, boolean wasIdempotentReplay) {
+        return new CancelOrderResult(
+                order.getId(),
+                order.getStatus(),
+                order.getUpdatedAt(),
+                wasIdempotentReplay
+        );
+    }
+
+    public static class InvalidOrderStateException extends RuntimeException {
+        public InvalidOrderStateException(UUID orderId, OrderStatus currentStatus, String operation) {
+            super(String.format(
+                    "Cannot %s order %s in state %s (only CONFIRMED orders can be cancelled)",
+                    operation, orderId, currentStatus));
+        }
+    }
+
 }

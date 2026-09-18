@@ -41,7 +41,7 @@ public class InventoryEventListener {
             log.info("Received event: type={}, eventId={}", eventType, eventId);
 
             switch (eventType) {
-                case "StockReserved", "StockConfirmed" -> processSagaEvent(eventId, eventType, envelope);
+                case "StockReserved", "StockConfirmed", "StockReleased" -> processSagaEvent(eventId, eventType, envelope);
                 default -> log.debug("Ignoring event type: {}", eventType);
             }
 

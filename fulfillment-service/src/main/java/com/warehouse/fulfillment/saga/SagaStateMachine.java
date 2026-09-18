@@ -25,7 +25,7 @@ public class SagaStateMachine {
      * to the caller that the event was unexpected but shouldn't crash.
      */
     public SagaTransition nextTransition(SagaState currentState, String eventType) {
-        // Happy-path transitions — Session 9 scope
+        // Happy-path transitions — Session 9
         if (currentState == SagaState.PENDING && "StockReserved".equals(eventType)) {
             return SagaTransition.of(SagaState.RESERVED, SagaCommand.CONFIRM_RESERVATION);
         }
@@ -34,12 +34,14 @@ public class SagaStateMachine {
             return SagaTransition.of(SagaState.CONFIRMED, SagaCommand.ORDER_CONFIRMED);
         }
 
-        // Session 10 will add:
-        //   PENDING  + StockReservationFailed → FAILED (issue OrderFailed event)
-        //   CONFIRMED + [cancel API triggers manually, not via event] → issues RELEASE_STOCK
-        //   [any]    + StockReleased          → CANCELLED (issue OrderCancelled event)
+        // Compensation transitions — Session 10 (NEW)
+        if (currentState == SagaState.CANCELLING && "StockReleased".equals(eventType)) {
+            return SagaTransition.of(SagaState.CANCELLED, SagaCommand.ORDER_CANCELLED);
+        }
 
-        // No matching rule — event unexpected in this state
+        // Session 11 (or as polish) will add:
+        //   PENDING + StockReservationFailed → FAILED (issue OrderFailed event)
+
         log.warn("No Saga transition defined for state={}, event={}", currentState, eventType);
         return SagaTransition.invalid(currentState);
     }

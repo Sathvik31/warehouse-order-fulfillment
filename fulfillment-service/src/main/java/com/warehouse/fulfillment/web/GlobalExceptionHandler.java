@@ -9,6 +9,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import com.warehouse.fulfillment.service.OrderService;
 
 import java.net.URI;
 import java.util.UUID;
@@ -67,6 +68,28 @@ public class GlobalExceptionHandler {
         pd.setTitle("Internal server error");
         pd.setInstance(URI.create(request.getRequestURI()));
         pd.setProperty("correlationId", correlationId);
+        return pd;
+    }
+
+    @ExceptionHandler(OrderService.OrderNotFoundException.class)
+    public ProblemDetail handleOrderNotFound(
+            OrderService.OrderNotFoundException ex, HttpServletRequest request) {
+        var pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        pd.setType(URI.create("https://api.warehouse/errors/order-not-found"));
+        pd.setTitle("Order not found");
+        pd.setInstance(URI.create(request.getRequestURI()));
+        pd.setProperty("correlationId", UUID.randomUUID().toString());
+        return pd;
+    }
+
+    @ExceptionHandler(OrderService.InvalidOrderStateException.class)
+    public ProblemDetail handleInvalidOrderState(
+            OrderService.InvalidOrderStateException ex, HttpServletRequest request) {
+        var pd = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+        pd.setType(URI.create("https://api.warehouse/errors/invalid-order-state"));
+        pd.setTitle("Invalid order state");
+        pd.setInstance(URI.create(request.getRequestURI()));
+        pd.setProperty("correlationId", UUID.randomUUID().toString());
         return pd;
     }
 
