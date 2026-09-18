@@ -1,6 +1,12 @@
 spring:
   application:
     name: fulfillment-service
+  swagger-ui:
+    disable-swagger-default-url: false
+    pageable:
+      default-page-number: 0
+      default-page-size: 20
+      one-indexed-parameters: false
 
   datasource:
     url: jdbc:postgresql://localhost:5433/fulfillment_db

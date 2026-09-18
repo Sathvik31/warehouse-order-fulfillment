@@ -1,5 +1,6 @@
 package com.warehouse.fulfillment.web;
 
+import com.warehouse.fulfillment.service.OrderQueryService;
 import com.warehouse.fulfillment.service.OrderService;
 import com.warehouse.fulfillment.service.PlaceOrderRequest;
 import io.swagger.v3.oas.annotations.Operation;
@@ -10,6 +11,8 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -19,6 +22,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import com.warehouse.fulfillment.service.CancelOrderRequest;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.GetMapping;
+import com.warehouse.fulfillment.domain.OrderStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.PageableDefault;
+import org.springframework.web.bind.annotation.RequestParam;
 import java.util.UUID;
 
 @RestController
@@ -29,6 +38,7 @@ import java.util.UUID;
 public class OrderController {
 
     private final OrderService orderService;
+    private final OrderQueryService orderQueryService;
 
     @PostMapping
     @Operation(summary = "Place a new order (kicks off Saga)")
@@ -87,5 +97,48 @@ public class OrderController {
         );
 
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(response);
+    }
+
+    @GetMapping("/{orderId}")
+    @Operation(summary = "Get order details and current Saga state")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Order found"),
+            @ApiResponse(responseCode = "404", description = "Order not found")
+    })
+    public ResponseEntity<OrderView> getOrder(
+            @Parameter(description = "Order ID to look up", required = true)
+            @PathVariable UUID orderId
+    ) {
+        var view = orderQueryService.getOrderById(orderId);
+        return ResponseEntity.ok(view);
+    }
+
+    @GetMapping
+    @Operation(summary = "List orders with optional filters and pagination")
+    public ResponseEntity<Page<OrderView>> listOrders(
+            @RequestParam(required = false) String customerId,
+            @RequestParam(required = false) String status,
+
+            @Parameter(description = "Page number (0-indexed)", example = "0")
+            @RequestParam(defaultValue = "0") int page,
+
+            @Parameter(description = "Page size", example = "20")
+            @RequestParam(defaultValue = "20") int size,
+
+            @Parameter(description = "Sort field and direction, e.g. createdAt,desc", example = "createdAt,desc")
+            @RequestParam(defaultValue = "createdAt,desc") String sort
+    ) {
+        var sortParts = sort.split(",");
+        var direction = sortParts.length > 1 && sortParts[1].equalsIgnoreCase("asc")
+                ? Sort.Direction.ASC : Sort.Direction.DESC;
+        var pageable = PageRequest.of(page, size, Sort.by(direction, sortParts[0]));
+
+        UUID parsedCustomerId = (customerId != null && !customerId.isBlank())
+                ? UUID.fromString(customerId) : null;
+        OrderStatus parsedStatus = (status != null && !status.isBlank())
+                ? OrderStatus.valueOf(status.toUpperCase()) : null;
+
+        var result = orderQueryService.listOrders(parsedCustomerId, parsedStatus, pageable);
+        return ResponseEntity.ok(result);
     }
 }
