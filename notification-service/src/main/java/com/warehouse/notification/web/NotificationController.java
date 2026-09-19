@@ -12,6 +12,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import com.warehouse.notification.web.NotificationRuleRequest;
+import com.warehouse.notification.web.NotificationRuleView;
+import jakarta.validation.Valid;
+import java.util.List;
 
 import java.util.UUID;
 
@@ -61,6 +65,25 @@ public class NotificationController {
             @PathVariable UUID notificationId
     ) {
         var result = notificationService.acknowledge(notificationId);
+        return ResponseEntity.ok(result);
+    }
+
+    @PostMapping("/rules")
+    @Operation(summary = "Create or update a per-SKU alert threshold rule")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Rule created or updated")
+    })
+    public ResponseEntity<NotificationRuleView> upsertRule(
+            @Valid @RequestBody NotificationRuleRequest request
+    ) {
+        var result = notificationService.upsertRule(request.sku(), request.alertThreshold());
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/rules")
+    @Operation(summary = "List all configured notification rules")
+    public ResponseEntity<List<NotificationRuleView>> listRules() {
+        var result = notificationService.listRules();
         return ResponseEntity.ok(result);
     }
 }

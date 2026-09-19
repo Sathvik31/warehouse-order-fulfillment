@@ -151,6 +151,8 @@ public class InventoryService {
                 .orElseThrow(() -> new StockNotFoundException(
                         reservation.getItemId(), reservation.getWarehouseId()));
 
+        // ---- Capture quantityOnHand BEFORE the confirm math, for crossing detection ----
+        int quantityOnHandBefore = stock.getQuantityOnHand();
         // Confirm: physical stock leaves, reservation is fulfilled.
         // Both quantity_on_hand and quantity_reserved decrement by the same amount.
         stock.setQuantityOnHand(stock.getQuantityOnHand() - reservation.getQuantity());
@@ -163,6 +165,9 @@ public class InventoryService {
         var savedReservation = reservationRepository.save(reservation);
 
         writeStockConfirmedToOutbox(savedReservation, stock);
+
+        // ---- NEW: edge-triggered StockLow check ----
+        checkAndPublishStockLow(stock, quantityOnHandBefore);
 
         if (itemSku != null) {
             inventoryQueryService.invalidateStockCache(itemSku);
@@ -299,6 +304,56 @@ public class InventoryService {
                 .topic("inventory.events")
                 .partitionKey(sku)
                 .eventType("StockReleased")
+                .payload(envelope)
+                .build();
+
+        outboxRepository.save(outboxEvent);
+    }
+
+    private void checkAndPublishStockLow(Stock stock, int quantityOnHandBefore) {
+        int threshold = stock.getPublishThreshold();
+        int quantityOnHandAfter = stock.getQuantityOnHand();
+
+        boolean wasAboveThreshold = quantityOnHandBefore >= threshold;
+        boolean isNowBelowThreshold = quantityOnHandAfter < threshold;
+
+        if (wasAboveThreshold && isNowBelowThreshold) {
+            var item = itemRepository.findById(stock.getItemId())
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Data integrity error: stock references non-existent item " + stock.getItemId()));
+
+            log.info("Stock crossed below publish threshold: sku={}, quantityOnHand={}, threshold={}",
+                    item.getSku(), quantityOnHandAfter, threshold);
+
+            writeStockLowToOutbox(item, stock);
+        }
+    }
+
+    private void writeStockLowToOutbox(Item item, Stock stock) {
+        var eventId = UUID.randomUUID();
+
+        Map<String, Object> envelope = new HashMap<>();
+        envelope.put("eventId", eventId.toString());
+        envelope.put("eventType", "StockLow");
+        envelope.put("eventVersion", 1);
+        envelope.put("occurredAt", OffsetDateTime.now().toString());
+        envelope.put("correlationId", item.getSku());   // no order context here — SKU is the natural correlation key
+        envelope.put("producer", "inventory-service");
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("sku", item.getSku());
+        payload.put("itemId", item.getId().toString());
+        payload.put("quantityOnHand", stock.getQuantityOnHand());
+        payload.put("publishThreshold", stock.getPublishThreshold());
+        envelope.put("payload", payload);
+
+        var outboxEvent = OutboxEvent.builder()
+                .id(eventId)
+                .aggregateType("Stock")
+                .aggregateId(item.getSku())
+                .topic("inventory.events")
+                .partitionKey(item.getSku())
+                .eventType("StockLow")
                 .payload(envelope)
                 .build();
 

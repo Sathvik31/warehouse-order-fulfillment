@@ -11,6 +11,10 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import com.warehouse.notification.domain.NotificationRule;
+import com.warehouse.notification.repository.NotificationRuleRepository;
+import com.warehouse.notification.web.NotificationRuleView;
+import java.util.List;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -21,7 +25,7 @@ import java.util.UUID;
 public class NotificationService {
 
     private final NotificationRepository notificationRepository;
-
+    private final NotificationRuleRepository notificationRuleRepository;
     @Transactional(readOnly = true)
     public Page<NotificationView> listNotifications(
             Boolean acknowledged, NotificationType type, int page, int size, String sort) {
@@ -58,6 +62,45 @@ public class NotificationService {
 
         log.info("Notification acknowledged: id={}", notificationId);
         return toView(saved);
+    }
+
+    @Transactional
+    public NotificationRuleView upsertRule(String sku, int alertThreshold) {
+        var existing = notificationRuleRepository.findBySku(sku);
+
+        NotificationRule rule;
+        if (existing.isPresent()) {
+            rule = existing.get();
+            rule.setAlertThreshold(alertThreshold);
+            log.info("Updated notification rule: sku={}, alertThreshold={}", sku, alertThreshold);
+        } else {
+            rule = NotificationRule.builder()
+                    .id(UUID.randomUUID())
+                    .sku(sku)
+                    .alertThreshold(alertThreshold)
+                    .build();
+            log.info("Created notification rule: sku={}, alertThreshold={}", sku, alertThreshold);
+        }
+
+        var saved = notificationRuleRepository.save(rule);
+        return toRuleView(saved);
+    }
+
+    @Transactional(readOnly = true)
+    public List<NotificationRuleView> listRules() {
+        return notificationRuleRepository.findAllByOrderBySkuAsc().stream()
+                .map(this::toRuleView)
+                .toList();
+    }
+
+    private NotificationRuleView toRuleView(NotificationRule r) {
+        return new NotificationRuleView(
+                r.getId(),
+                r.getSku(),
+                r.getAlertThreshold(),
+                r.getCreatedAt(),
+                r.getUpdatedAt()
+        );
     }
 
     private Sort buildPageable_Sort(String sort) {
