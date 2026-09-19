@@ -115,6 +115,9 @@ Full rationale for each major decision is in [`docs/adr/`](docs/adr/) as formal 
 
 ## Quick start
 
+Ran into an issue? Check [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
+for real problems hit during development and their fixes.
+
 **Prerequisites:** Docker Desktop, Java 17, Maven.
 
 ```bash
